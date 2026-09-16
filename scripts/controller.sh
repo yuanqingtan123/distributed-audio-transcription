@@ -43,8 +43,13 @@ function validate_config() {
     for worker in "${workerAliases[@]}"; do
         validWorker=1
         for field in "${fields[@]}"; do
-            if ! _=$(yq -e ".configs[] | select(.alias == $worker) | .$field" "$workerConfigDir" 2>/dev/null); then
+            if ! output=$(yq -e ".configs[] | select(.alias == $worker) | .$field" "$workerConfigDir" 2>/dev/null); then
                 log_error "$field not found for $worker"
+                validWorker=0
+                break
+            fi
+            if [[ "$field" == "workload_weight" ]] && ! ([ -n "$output" ] && [ "$output" -eq "$output" ] 2>/dev/null); then
+                log_error "Invalid workload_weight for $worker"
                 validWorker=0
                 break
             fi
@@ -61,10 +66,22 @@ function get_config() {
     fieldname="$2"
     workerConfigDir="$3"
 
-    value=$(yq ".configs[] | select(.alias == \"$alias\") | .$fieldname" "$workerConfigDir")
+    value=$(yq ".configs[] | select(.alias == $alias) | .$fieldname" "$workerConfigDir")
     echo "$value"
 }
 
+function get_total_workload() {
+    workerAliases=("$@")
+    workerConfigDir="${workerAliases[-1]}"
+    unset 'workerAliases[-1]'
+
+    totalWeight=0
+    for worker in "${workerAliases[@]}"; do
+        weight=$(get_config "$worker" "workload_weight" "$workerConfigDir")
+        totalWeight=$((totalWeight + $weight))
+    done
+    echo "$totalWeight"
+}
 
 SCRIPT_NAME=$(basename "$0")
 USAGE_MSG="./$SCRIPT_NAME -i [input directory] -o [output directory] -c [workers config directory]"
@@ -120,7 +137,9 @@ if [[ "$numberOfWorkers" -gt 0 ]]; then
     log_info "Found $numberOfWorkers worker config(s) in $workerConfigDir"
 fi
 
-get_config termux-phone user "$workerConfigDir"
+totalWeight=$(get_total_workload "${validatedWorkers[@]}" "$workerConfigDir")
+
+log_info $totalWeight
 
 exit 0
 # # use bash yq to read configs for each worker
