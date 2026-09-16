@@ -8,3 +8,11 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Configuration and secrets
+ssh_configs.yaml
+
+# Data
+inputAudioFiles/
+
+.vscode/
