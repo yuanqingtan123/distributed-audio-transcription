@@ -43,7 +43,7 @@ function validate_config() {
     for worker in "${workerAliases[@]}"; do
         validWorker=1
         for field in "${fields[@]}"; do
-            if ! output=$(yq -e ".configs[] | select(.alias == $worker) | .$field" "$workerConfigDir" 2>/dev/null); then
+            if ! output=$(yq -e ".configs[] | select(.alias == \"$worker\") | .$field" "$workerConfigDir" 2>/dev/null); then
                 log_error "$field not found for $worker"
                 validWorker=0
                 break
@@ -66,7 +66,7 @@ function get_config() {
     fieldname="$2"
     workerConfigDir="$3"
 
-    value=$(yq ".configs[] | select(.alias == $alias) | .$fieldname" "$workerConfigDir")
+    value=$(yq ".configs[] | select(.alias == \"$alias\") | .$fieldname" "$workerConfigDir")
     echo "$value"
 }
 
@@ -81,6 +81,21 @@ function get_total_workload() {
         totalWeight=$((totalWeight + $weight))
     done
     echo "$totalWeight"
+}
+
+function get_index_of_min() {
+    array=("$@")
+    min="${array[0]}"
+    indexOfMin=0
+    index=0
+    for element in "${array[@]}"; do
+        if (( element < min )); then
+            min=$element
+            indexOfMin=$index
+        fi
+        index=$((index + 1))
+    done
+    echo "$indexOfMin"
 }
 
 SCRIPT_NAME=$(basename "$0")
@@ -128,7 +143,9 @@ if [[ "$numberOfInputFiles" -gt 0 ]]; then
     log_info "Found $numberOfInputFiles file(s) in $inputDir"
 fi
 
-mapfile -t workerAliases < <(yq ".configs[].alias" "$workerConfigDir")
+log_info "Validating worker config at $workerConfigDir"
+
+mapfile -t workerAliases < <(yq -r ".configs[].alias" "$workerConfigDir")
 
 mapfile -t validatedWorkers < <(validate_config "${workerAliases[@]}" "$workerConfigDir")
 
@@ -137,9 +154,72 @@ if [[ "$numberOfWorkers" -gt 0 ]]; then
     log_info "Found $numberOfWorkers worker config(s) in $workerConfigDir"
 fi
 
-totalWeight=$(get_total_workload "${validatedWorkers[@]}" "$workerConfigDir")
+totalWorkload=$(get_total_workload "${validatedWorkers[@]}" "$workerConfigDir")
 
-log_info $totalWeight
+for inputFile in "${inputFiles[@]}"; do
+    chunksDir="$TIMESTAMP-$inputFile"
+    # split_audio "$inputFile" 300 "$chunksDir"
+
+    chunksDir="inputAudioFiles/20260911T175429-6 May, 22.35​.m4a_chunks"
+    totalNumOfChunks=$(find "$chunksDir" -maxdepth 1 -name "*.wav" | wc -l)
+
+    log_info "Found $totalNumOfChunks chunks in <$chunksDir>"
+
+    log_info "Calculating chunk allocation for workers"
+    assignedChunk=0
+    chunksByWorker=()
+    workerToDeploy=1
+    for worker in "${validatedWorkers[@]}"; do
+        workload=$(get_config $worker workload_weight "$workerConfigDir")
+        numOfChunks=$(printf "%.0f\n" $(echo "scale=2; $workload * $totalNumOfChunks / $totalWorkload" | bc))
+        chunksByWorker+=($numOfChunks)
+        assignedChunk=$((assignedChunk + numOfChunks))
+        workerToDeploy=$((workerToDeploy + 1))
+    done
+    
+    remainingChunks=$((totalNumOfChunks - assignedChunk))
+
+    while ((remainingChunks > 0)); do
+        indexOfMin=$(get_index_of_min "${chunksByWorker[@]}")
+        chunksByWorker[$indexOfMin]=$((chunksByWorker[$indexOfMin] + 1))
+        remainingChunks=$((remainingChunks - 1))
+    done
+
+
+    log_info "Distributing chunks to each worker"
+    assignedChunk=0
+    counter=0
+    currentWorkerChunks=0
+    while ((counter < numberOfWorkers)); do
+        currentWorker=${validatedWorkers[$counter]}
+        currentWorkerChunks=$((currentWorkerChunks + ${chunksByWorker[$counter]}))
+        mkdir -p "$chunksDir/$currentWorker"
+
+        while ((assignedChunk < currentWorkerChunks)); do
+            filename=$(printf "chunk_%03d.wav" $assignedChunk)
+            sourceDirectory="$chunksDir"
+            destinationDirectory="$chunksDir/$currentWorker"
+            cp "$sourceDirectory/$filename" "$destinationDirectory/$filename" 
+            assignedChunk=$((assignedChunk + 1))
+        done
+        counter=$((counter + 1))
+    done
+
+
+    # if [[ "$assignedChunk" -lt "$totalNumOfChunks" ]]; then
+
+    # fi
+
+        # if [[ $workerToDeploy -eq $numberOfWorkers ]]; then
+        #     log_info $worker
+        #     numOfChunks=$((totalNumOfChunks - assignedChunk))
+        # fi
+        # chunks="${fileChunks[@]:$assignedChunk:$numOfChunks}"
+        # # chunksByWorker+=($chunks)
+        # log_info "$chunks"
+        # assignedChunk=$((assignedChunk + numOfChunks))
+        # workerToDeploy=$((workerToDeploy + 1))
+done
 
 exit 0
 # # use bash yq to read configs for each worker
