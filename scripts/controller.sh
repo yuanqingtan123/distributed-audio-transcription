@@ -7,6 +7,23 @@ log_info() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] INFO: $@"
 }
 
+function rename_files() {
+    local -n localInputFiles="$1"
+
+    renamedFiles=()
+    for file in "${localInputFiles[@]}"; do
+        parentDir=$(dirname "$file")
+        extension=$(basename "$file" | sed "s/^\(.*\)\(\..*\)$/\2/")
+        newBaseName=$(basename "$file" | sed "s/^\(.*\)\..*$/\1/" | LC_ALL=C sed 's/[^\x00-\x7F]//g' | tr '[:blank:]' '_')
+
+        renamedFile="$parentDir/${newBaseName}${extension}"
+        mv "$file" "$renamedFile" 2>/dev/null
+        renamedFiles+=("$renamedFile")
+    done
+
+    printf "%s\n" "${renamedFiles[@]}"
+}
+
 function split_audio() {
     input_file="$1"
     chunk_length="$2"
@@ -153,12 +170,14 @@ function start_workers() {
     workerHome="/data/data/com.termux/files/home"
     local -n localValidatedWorkers="$1"
     chunksDir="$2"
+    currentFileStaging="$3"
+    currentFileSignalDir="$4"
     pids=()
     for worker in "${localValidatedWorkers[@]}"; do
-        mkdir -p "tmp/$worker"
-        ssh -tt "$worker" "proot-distro login ubuntu -- bash -c 'cd test && ~/.local/bin/uv run src/script.py 2>/dev/null'" >"tmp/$worker/abc.txt" 2>/dev/null &
+        mkdir -p "staging/tmp/$worker"
+        ssh -tt "$worker" "proot-distro login ubuntu -- bash -c 'cd test && ~/.local/bin/uv run src/script.py 2>/dev/null'" >"staging/tmp/$worker/abc.txt" 2>/dev/null &
         log_info "Started script on $worker"
-        rsync -azp "$chunksDir/$worker/" "$worker:$workerHome/staging/" &
+        rsync -azp --mkpath "$chunksDir/$worker/" "$worker:$workerHome/$currentFileStaging/" &
         pid=$!
         pids+=($pid)
         log_info "PID $pid: Started transferring chunks to $worker"
@@ -168,9 +187,9 @@ function start_workers() {
         currentWorker="${validatedWorkers[$counter]}"
         currentPid="${pids[$counter]}"
         wait $currentPid
-        signalFile="tmp/controller-$currentWorker.signal"
-        touch $signalFile
-        rsync -azp $signalFile "$currentWorker:$workerHome/signal/"
+        signalFile="$currentFileSignalDir/controller-$currentWorker.signal"
+        touch "$signalFile"
+        rsync -azp --mkpath $signalFile "$currentWorker:$workerHome/$currentFileSignalDir/"
         log_info "Transfer chunks to $currentWorker complete"
         counter=$((counter + 1))
     done
@@ -178,7 +197,6 @@ function start_workers() {
 
 function get_signal_file_names() {
     local -n localValidatedWorkers="$1"
-    mkdir -p signal
     signalFilesToWait=()
     for worker in "${localValidatedWorkers[@]}"; do
         signalFile="$worker-controller.signal"
@@ -189,6 +207,7 @@ function get_signal_file_names() {
 
 function wait_signal_files() {
     local -n localSignalFilesToWait="$1"
+    currentFileSignalDir="$2"
 
     pattern="($(
         IFS='|'
@@ -214,7 +233,7 @@ function wait_signal_files() {
         if [ "$count" -ge "$needed" ]; then
             break
         fi
-    done < <(inotifywait -m -e close_write --format '%f' --include "$pattern" signal 2>/dev/null)
+    done < <(inotifywait -m -e close_write --format '%f' --include "$pattern" "$currentFileSignalDir" 2>/dev/null)
 
 }
 
@@ -263,6 +282,9 @@ if [[ "$numberOfInputFiles" -gt 0 ]]; then
     log_info "Found $numberOfInputFiles file(s) in $inputDir"
 fi
 
+log_info "Renaming input files"
+mapfile -t renamedFiles < <(rename_files inputFiles)
+
 log_info "Validating worker config at $workerConfigDir"
 
 mapfile -t workerAliases < <(yq -r ".configs[].alias" "$workerConfigDir")
@@ -276,8 +298,12 @@ fi
 
 totalWorkload=$(get_total_workload validatedWorkers "$workerConfigDir")
 
-for inputFile in "${inputFiles[@]}"; do
-    chunksDir="$TIMESTAMP-$inputFile"
+for inputFile in "${renamedFiles[@]}"; do
+    currentFileStaging="staging/$inputFile"
+    chunksDir="$currentFileStaging/$TIMESTAMP-$inputFile"
+    currentFileSignalDir="$currentFileStaging/signal"
+    mkdir -p "$currentFileSignalDir"
+
     # split_audio "$inputFile" 300 "$chunksDir"
 
     # temporary for testing purpose
@@ -292,15 +318,16 @@ for inputFile in "${inputFiles[@]}"; do
     log_info "Distributing chunks to each worker"
     distribute_chunks_to_workers validatedWorkers $numberOfWorkers chunksByWorker "$chunksDir"
 
-    workerHome="/data/data/com.termux/files/home"
-
     log_info "Transferring chunks to workers and starting processes on workers"
-    start_workers validatedWorkers "$chunksDir"
+    start_workers validatedWorkers "$chunksDir" "$currentFileStaging" "$currentFileSignalDir"
 
     mapfile -t signalFilesToWait < <(get_signal_file_names validatedWorkers)
     log_info "Waiting for signal from workers"
-    wait_signal_files signalFilesToWait
+    wait_signal_files signalFilesToWait "$currentFileSignalDir"
+    log_info "All workers done. Start consolidating SRT chunks."
 
+    # uv run src/distributed_audio_transcription/consolidateSRTChunks.py \
+    # --inputDir
     # continue process
 
     log_info "Done processing $inputFile"
