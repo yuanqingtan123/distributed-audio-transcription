@@ -22,25 +22,24 @@ function split_audio() {
 }
 
 function validate_config() {
-    workerAliases=("$@")
-    workerConfigDir="${workerAliases[-1]}"
-    unset 'workerAliases[-1]'
+    local -n localWorkerAliases="$1"
+    workerConfigDir="$2"
 
-    mapfile -t uniqueWorkerAliases < <(printf "%s\n" "${workerAliases[@]}" | sort -u)
+    mapfile -t uniqueWorkerAliases < <(printf "%s\n" "${localWorkerAliases[@]}" | sort -u)
 
-    if [[ "${#workerAliases[@]}" -eq 0 ]]; then
+    if [[ "${#localWorkerAliases[@]}" -eq 0 ]]; then
         log_error "No workers in config"
         exit 1
     fi
 
-    if [[ "${#workerAliases[@]}" -ne "${#uniqueWorkerAliases[@]}" ]]; then
+    if [[ "${#localWorkerAliases[@]}" -ne "${#uniqueWorkerAliases[@]}" ]]; then
         log_error "Invalid config: Duplicated aliases detected"
         exit 1
     fi
 
     fields=("host" "user" "port" "password" "workload_weight")
     validatedWorkers=()
-    for worker in "${workerAliases[@]}"; do
+    for worker in "${localWorkerAliases[@]}"; do
         validWorker=1
         for field in "${fields[@]}"; do
             if ! output=$(yq -e ".configs[] | select(.alias == \"$worker\") | .$field" "$workerConfigDir" 2>/dev/null); then
@@ -71,12 +70,11 @@ function get_config() {
 }
 
 function get_total_workload() {
-    workerAliases=("$@")
-    workerConfigDir="${workerAliases[-1]}"
-    unset 'workerAliases[-1]'
+    local -n localValidatedWorkers="$1"
+    workerConfigDir="$2"
 
     totalWeight=0
-    for worker in "${workerAliases[@]}"; do
+    for worker in "${localValidatedWorkers[@]}"; do
         weight=$(get_config "$worker" "workload_weight" "$workerConfigDir")
         totalWeight=$((totalWeight + $weight))
     done
@@ -84,18 +82,140 @@ function get_total_workload() {
 }
 
 function get_index_of_min() {
-    array=("$@")
+    local -n array="$1"
     min="${array[0]}"
     indexOfMin=0
     index=0
     for element in "${array[@]}"; do
-        if (( element < min )); then
+        if ((element < min)); then
             min=$element
             indexOfMin=$index
         fi
         index=$((index + 1))
     done
     echo "$indexOfMin"
+}
+
+function get_chunks_by_worker() {
+    local -n localValidatedWorkers="$1"
+    workerConfigDir="$2"
+    totalNumOfChunks="$3"
+    totalWorkload="$4"
+
+    assignedChunk=0
+    chunksByWorker=()
+    workerToDeploy=1
+    for worker in "${localValidatedWorkers[@]}"; do
+        workload=$(get_config $worker workload_weight "$workerConfigDir")
+        numOfChunks=$(printf "%.0f\n" $(echo "scale=2; $workload * $totalNumOfChunks / $totalWorkload" | bc))
+        chunksByWorker+=($numOfChunks)
+        assignedChunk=$((assignedChunk + numOfChunks))
+        workerToDeploy=$((workerToDeploy + 1))
+    done
+
+    remainingChunks=$((totalNumOfChunks - assignedChunk))
+
+    while ((remainingChunks > 0)); do
+        indexOfMin=$(get_index_of_min chunksByWorker)
+        chunksByWorker[$indexOfMin]=$((chunksByWorker[$indexOfMin] + 1))
+        remainingChunks=$((remainingChunks - 1))
+    done
+
+    printf "%s\n" "${chunksByWorker[@]}"
+}
+
+function distribute_chunks_to_workers() {
+    local -n localValidatedWorkers="$1"
+    numberOfWorkers="$2"
+    local -n localChunksByWorker="$3"
+    chunksDir="$4"
+
+    assignedChunk=0
+    counter=0
+    currentWorkerChunks=0
+    while ((counter < numberOfWorkers)); do
+        currentWorker=${localValidatedWorkers[$counter]}
+        currentWorkerChunks=$((currentWorkerChunks + ${localChunksByWorker[$counter]}))
+        mkdir -p "$chunksDir/$currentWorker"
+
+        while ((assignedChunk < currentWorkerChunks)); do
+            filename=$(printf "chunk_%03d.wav" $assignedChunk)
+            sourceDirectory="$chunksDir"
+            destinationDirectory="$chunksDir/$currentWorker"
+            cp "$sourceDirectory/$filename" "$destinationDirectory/$filename"
+            assignedChunk=$((assignedChunk + 1))
+        done
+        counter=$((counter + 1))
+    done
+}
+
+function start_workers() {
+    workerHome="/data/data/com.termux/files/home"
+    local -n localValidatedWorkers="$1"
+    chunksDir="$2"
+    pids=()
+    for worker in "${localValidatedWorkers[@]}"; do
+        mkdir -p "tmp/$worker"
+        ssh -tt "$worker" "proot-distro login ubuntu -- bash -c 'cd test && ~/.local/bin/uv run src/script.py 2>/dev/null'" >"tmp/$worker/abc.txt" 2>/dev/null &
+        log_info "Started script on $worker"
+        rsync -azp "$chunksDir/$worker/" "$worker:$workerHome/staging/" &
+        pid=$!
+        pids+=($pid)
+        log_info "PID $pid: Started transferring chunks to $worker"
+    done
+    counter=0
+    while ((counter < numberOfWorkers)); do
+        currentWorker="${validatedWorkers[$counter]}"
+        currentPid="${pids[$counter]}"
+        wait $currentPid
+        signalFile="tmp/controller-$currentWorker.signal"
+        touch $signalFile
+        rsync -azp $signalFile "$currentWorker:$workerHome/signal/"
+        log_info "Transfer chunks to $currentWorker complete"
+        counter=$((counter + 1))
+    done
+}
+
+function get_signal_file_names() {
+    local -n localValidatedWorkers="$1"
+    mkdir -p signal
+    signalFilesToWait=()
+    for worker in "${localValidatedWorkers[@]}"; do
+        signalFile="$worker-controller.signal"
+        signalFilesToWait+=($signalFile)
+    done
+    printf "%s\n" "${signalFilesToWait[@]}"
+}
+
+function wait_signal_files() {
+    local -n localSignalFilesToWait="$1"
+
+    pattern="($(
+        IFS='|'
+        echo "${localSignalFilesToWait[*]}"
+    ))"
+
+    count=0
+    needed=${#localSignalFilesToWait[@]}
+
+    # 2. Use an associative array to track uniquely received signals
+    declare -A received_signals
+
+    # 3. Only listen for close_write to avoid double-firing events per file
+    while read -r created; do
+        # Only process if we haven't seen this specific file yet
+        if [ -z "${received_signals[$created]}" ]; then
+            received_signals[$created]=1
+            ((count++))
+
+            log_info "Received $created ($count/$needed)"
+        fi
+
+        if [ "$count" -ge "$needed" ]; then
+            break
+        fi
+    done < <(inotifywait -m -e close_write --format '%f' --include "$pattern" signal 2>/dev/null)
+
 }
 
 SCRIPT_NAME=$(basename "$0")
@@ -147,78 +267,43 @@ log_info "Validating worker config at $workerConfigDir"
 
 mapfile -t workerAliases < <(yq -r ".configs[].alias" "$workerConfigDir")
 
-mapfile -t validatedWorkers < <(validate_config "${workerAliases[@]}" "$workerConfigDir")
+mapfile -t validatedWorkers < <(validate_config workerAliases "$workerConfigDir")
 
 numberOfWorkers="${#validatedWorkers[@]}"
 if [[ "$numberOfWorkers" -gt 0 ]]; then
     log_info "Found $numberOfWorkers worker config(s) in $workerConfigDir"
 fi
 
-totalWorkload=$(get_total_workload "${validatedWorkers[@]}" "$workerConfigDir")
+totalWorkload=$(get_total_workload validatedWorkers "$workerConfigDir")
 
 for inputFile in "${inputFiles[@]}"; do
     chunksDir="$TIMESTAMP-$inputFile"
     # split_audio "$inputFile" 300 "$chunksDir"
 
+    # temporary for testing purpose
     chunksDir="inputAudioFiles/20260911T175429-6 May, 22.35​.m4a_chunks"
-    totalNumOfChunks=$(find "$chunksDir" -maxdepth 1 -name "*.wav" | wc -l)
 
+    totalNumOfChunks=$(find "$chunksDir" -maxdepth 1 -name "*.wav" | wc -l)
     log_info "Found $totalNumOfChunks chunks in <$chunksDir>"
 
     log_info "Calculating chunk allocation for workers"
-    assignedChunk=0
-    chunksByWorker=()
-    workerToDeploy=1
-    for worker in "${validatedWorkers[@]}"; do
-        workload=$(get_config $worker workload_weight "$workerConfigDir")
-        numOfChunks=$(printf "%.0f\n" $(echo "scale=2; $workload * $totalNumOfChunks / $totalWorkload" | bc))
-        chunksByWorker+=($numOfChunks)
-        assignedChunk=$((assignedChunk + numOfChunks))
-        workerToDeploy=$((workerToDeploy + 1))
-    done
-    
-    remainingChunks=$((totalNumOfChunks - assignedChunk))
-
-    while ((remainingChunks > 0)); do
-        indexOfMin=$(get_index_of_min "${chunksByWorker[@]}")
-        chunksByWorker[$indexOfMin]=$((chunksByWorker[$indexOfMin] + 1))
-        remainingChunks=$((remainingChunks - 1))
-    done
-
+    mapfile -t chunksByWorker < <(get_chunks_by_worker validatedWorkers "$workerConfigDir" "$totalNumOfChunks" "$totalWorkload")
 
     log_info "Distributing chunks to each worker"
-    assignedChunk=0
-    counter=0
-    currentWorkerChunks=0
-    while ((counter < numberOfWorkers)); do
-        currentWorker=${validatedWorkers[$counter]}
-        currentWorkerChunks=$((currentWorkerChunks + ${chunksByWorker[$counter]}))
-        mkdir -p "$chunksDir/$currentWorker"
+    distribute_chunks_to_workers validatedWorkers $numberOfWorkers chunksByWorker "$chunksDir"
 
-        while ((assignedChunk < currentWorkerChunks)); do
-            filename=$(printf "chunk_%03d.wav" $assignedChunk)
-            sourceDirectory="$chunksDir"
-            destinationDirectory="$chunksDir/$currentWorker"
-            cp "$sourceDirectory/$filename" "$destinationDirectory/$filename" 
-            assignedChunk=$((assignedChunk + 1))
-        done
-        counter=$((counter + 1))
-    done
+    workerHome="/data/data/com.termux/files/home"
 
+    log_info "Transferring chunks to workers and starting processes on workers"
+    start_workers validatedWorkers "$chunksDir"
 
-    # if [[ "$assignedChunk" -lt "$totalNumOfChunks" ]]; then
+    mapfile -t signalFilesToWait < <(get_signal_file_names validatedWorkers)
+    log_info "Waiting for signal from workers"
+    wait_signal_files signalFilesToWait
 
-    # fi
+    # continue process
 
-        # if [[ $workerToDeploy -eq $numberOfWorkers ]]; then
-        #     log_info $worker
-        #     numOfChunks=$((totalNumOfChunks - assignedChunk))
-        # fi
-        # chunks="${fileChunks[@]:$assignedChunk:$numOfChunks}"
-        # # chunksByWorker+=($chunks)
-        # log_info "$chunks"
-        # assignedChunk=$((assignedChunk + numOfChunks))
-        # workerToDeploy=$((workerToDeploy + 1))
+    log_info "Done processing $inputFile"
 done
 
 exit 0
