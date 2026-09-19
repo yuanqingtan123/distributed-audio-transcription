@@ -145,7 +145,7 @@ function distribute_chunks_to_workers() {
     local -n localValidatedWorkers="$1"
     numberOfWorkers="$2"
     local -n localChunksByWorker="$3"
-    chunksDir="$4"
+    audioChunksDir="$4"
 
     assignedChunk=0
     counter=0
@@ -153,13 +153,13 @@ function distribute_chunks_to_workers() {
     while ((counter < numberOfWorkers)); do
         currentWorker=${localValidatedWorkers[$counter]}
         currentWorkerChunks=$((currentWorkerChunks + ${localChunksByWorker[$counter]}))
-        mkdir -p "$chunksDir/$currentWorker"
+        mkdir -p "$audioChunksDir/$currentWorker"
 
         while ((assignedChunk < currentWorkerChunks)); do
             filename=$(printf "chunk_%03d.wav" $assignedChunk)
-            sourceDirectory="$chunksDir"
-            destinationDirectory="$chunksDir/$currentWorker"
-            cp "$sourceDirectory/$filename" "$destinationDirectory/$filename"
+            sourceDirectory="$audioChunksDir"
+            destinationDirectory="$audioChunksDir/$currentWorker"
+            mv "$sourceDirectory/$filename" "$destinationDirectory/$filename"
             assignedChunk=$((assignedChunk + 1))
         done
         counter=$((counter + 1))
@@ -169,14 +169,14 @@ function distribute_chunks_to_workers() {
 function start_workers() {
     workerHome="/data/data/com.termux/files/home"
     local -n localValidatedWorkers="$1"
-    chunksDir="$2"
+    audioChunksDir="$2"
     currentFileSignalDir="$3"
     pids=()
     for worker in "${localValidatedWorkers[@]}"; do
-        mkdir -p "staging/tmp/$worker"
-        ssh -tt "$worker" "proot-distro login ubuntu -- bash -c 'cd test && ~/.local/bin/uv run src/script.py 2>/dev/null'" >"staging/tmp/$worker/abc.txt" 2>/dev/null &
+        mkdir -p "$audioChunksDir/../tmp/$worker/"
+        ssh -tt "$worker" "proot-distro login ubuntu -- bash -c 'cd test && ~/.local/bin/uv run src/script.py 2>/dev/null'" >"$audioChunksDir/../tmp/$worker/abc.txt" 2>/dev/null &
         log_info "Started script on $worker"
-        rsync -azp --mkpath "$chunksDir/$worker/" "$worker:$workerHome/$chunksDir/" &
+        rsync -azp --mkpath "$audioChunksDir/$worker" "$worker:$workerHome/$audioChunksDir/" &
         pid=$!
         pids+=($pid)
         log_info "PID $pid: Started transferring chunks to $worker"
@@ -300,43 +300,54 @@ fi
 
 totalWorkload=$(get_total_workload validatedWorkers "$workerConfigDir")
 
+processedFile=0
 for inputFilePath in "${renamedFiles[@]}"; do
     TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
     inputFileName=$(basename "$inputFilePath")
     currentFileStaging="staging/$TIMESTAMP-$inputFileName"
-    chunksDir="$currentFileStaging/audioChunks"
+    audioChunksDir="$currentFileStaging/audioChunks"
+    srtChunksDir="$currentFileStaging/srtChunks"
     currentFileSignalDir="$currentFileStaging/signal"
     mkdir -p "$currentFileSignalDir"
-    mkdir -p "$chunksDir"
+    mkdir -p "$audioChunksDir"
+    mkdir -p "$srtChunksDir"
 
     log_info "Start processing $inputFilePath"
-    split_audio "$inputFilePath" 300 "$chunksDir"
-    totalNumOfChunks=$(find "$chunksDir" -maxdepth 1 -name "*.wav" | wc -l)
-    log_info "Finished splitting $inputFileName into $totalNumOfChunks chunks to <$chunksDir>"
+    split_audio "$inputFilePath" 300 "$audioChunksDir"
+    totalNumOfChunks=$(find "$audioChunksDir" -maxdepth 1 -name "*.wav" | wc -l)
+    log_info "Finished splitting $inputFileName into $totalNumOfChunks chunks to <$audioChunksDir>"
 
     # # temporary for testing purpose
-    # chunksDir="inputAudioFiles/20260911T175429-6 May, 22.35​.m4a_chunks"
+    # audioChunksDir="inputAudioFiles/20260911T175429-6 May, 22.35​.m4a_chunks"
 
     log_info "Calculating chunk allocation for workers"
     mapfile -t chunksByWorker < <(get_chunks_by_worker validatedWorkers "$workerConfigDir" "$totalNumOfChunks" "$totalWorkload")
 
     log_info "Distributing chunks to each worker"
-    distribute_chunks_to_workers validatedWorkers $numberOfWorkers chunksByWorker "$chunksDir"
+    distribute_chunks_to_workers validatedWorkers $numberOfWorkers chunksByWorker "$audioChunksDir"
 
     log_info "Transferring chunks to workers and starting processes on workers"
-    start_workers validatedWorkers "$chunksDir" "$currentFileSignalDir"
+    start_workers validatedWorkers "$audioChunksDir" "$currentFileSignalDir"
 
     mapfile -t signalFilesToWait < <(get_signal_file_names validatedWorkers)
     log_info "Waiting for signal from workers"
     wait_signal_files signalFilesToWait "$currentFileSignalDir"
-    log_info "All workers done. Start consolidating SRT chunks."
+    log_info "All workers done."
 
-    # uv run src/distributed_audio_transcription/consolidateSRTChunks.py \
-    # --inputDir
-    # continue process
+    log_info "Start consolidating SRT chunks from <$audioChunksDir>"
+    uv run src/distributed_audio_transcription/controller/consolidate_srt.py --srt-chunks-dir "tests/20260919_163731-test_data.m4a/audioChunks"
+    # uv run src/distributed_audio_transcription/controller/consolidate_srt.py --srt-chunks-dir "$audioChunksDir"
 
     log_info "Done processing $inputFilePath"
+    processedFile=$((processedFile + 1))
 done
+
+if [[ "$processedFile" -eq "$numberOfInputFiles" ]]; then
+    log_info "Successfully processed all $numberOfInputFiles files"
+else
+    log_error "Successfully processed $processedFile of $numberOfInputFiles files"
+    log_error "Failed to process $((numberOfInputFiles - processedFile))"
+fi
 
 log_info "Script ended"
 exit 0
