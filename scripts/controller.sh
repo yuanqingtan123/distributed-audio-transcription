@@ -32,7 +32,7 @@ function split_audio() {
     ffmpeg -i "$input_file" \
         -f segment \
         -segment_time "$chunk_length" \
-        -c pcm_s161e \
+        -c pcm_s16le \
         -hide_banner \
         -loglevel error \
         "${chunks_dir}/chunk_%03d.wav"
@@ -170,14 +170,13 @@ function start_workers() {
     workerHome="/data/data/com.termux/files/home"
     local -n localValidatedWorkers="$1"
     chunksDir="$2"
-    currentFileStaging="$3"
-    currentFileSignalDir="$4"
+    currentFileSignalDir="$3"
     pids=()
     for worker in "${localValidatedWorkers[@]}"; do
         mkdir -p "staging/tmp/$worker"
         ssh -tt "$worker" "proot-distro login ubuntu -- bash -c 'cd test && ~/.local/bin/uv run src/script.py 2>/dev/null'" >"staging/tmp/$worker/abc.txt" 2>/dev/null &
         log_info "Started script on $worker"
-        rsync -azp --mkpath "$chunksDir/$worker/" "$worker:$workerHome/$currentFileStaging/" &
+        rsync -azp --mkpath "$chunksDir/$worker/" "$worker:$workerHome/$chunksDir/" &
         pid=$!
         pids+=($pid)
         log_info "PID $pid: Started transferring chunks to $worker"
@@ -186,7 +185,7 @@ function start_workers() {
     while ((counter < numberOfWorkers)); do
         currentWorker="${validatedWorkers[$counter]}"
         currentPid="${pids[$counter]}"
-        wait $currentPid
+        wait "$currentPid"
         signalFile="$currentFileSignalDir/controller-$currentWorker.signal"
         touch "$signalFile"
         rsync -azp --mkpath $signalFile "$currentWorker:$workerHome/$currentFileSignalDir/"
@@ -273,13 +272,16 @@ log_info "Script started"
 log_info "Input directory: $inputDir"
 log_info "Output directory: $outputDir"
 log_info "Worker config directory: $workerConfigDir"
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 
 mapfile -t inputFiles < <(find "$inputDir" -maxdepth 1 -type f)
 
 numberOfInputFiles="${#inputFiles[@]}"
 if [[ "$numberOfInputFiles" -gt 0 ]]; then
     log_info "Found $numberOfInputFiles file(s) in $inputDir"
+else
+    log_info "No files to process"
+    log_info "Script ended"
+    exit 0
 fi
 
 log_info "Renaming input files"
@@ -298,19 +300,22 @@ fi
 
 totalWorkload=$(get_total_workload validatedWorkers "$workerConfigDir")
 
-for inputFile in "${renamedFiles[@]}"; do
-    currentFileStaging="staging/$inputFile"
-    chunksDir="$currentFileStaging/$TIMESTAMP-$inputFile"
+for inputFilePath in "${renamedFiles[@]}"; do
+    TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+    inputFileName=$(basename "$inputFilePath")
+    currentFileStaging="staging/$TIMESTAMP-$inputFileName"
+    chunksDir="$currentFileStaging/audioChunks"
     currentFileSignalDir="$currentFileStaging/signal"
     mkdir -p "$currentFileSignalDir"
+    mkdir -p "$chunksDir"
 
-    # split_audio "$inputFile" 300 "$chunksDir"
-
-    # temporary for testing purpose
-    chunksDir="inputAudioFiles/20260911T175429-6 May, 22.35​.m4a_chunks"
-
+    log_info "Start processing $inputFilePath"
+    split_audio "$inputFilePath" 300 "$chunksDir"
     totalNumOfChunks=$(find "$chunksDir" -maxdepth 1 -name "*.wav" | wc -l)
-    log_info "Found $totalNumOfChunks chunks in <$chunksDir>"
+    log_info "Finished splitting $inputFileName into $totalNumOfChunks chunks to <$chunksDir>"
+
+    # # temporary for testing purpose
+    # chunksDir="inputAudioFiles/20260911T175429-6 May, 22.35​.m4a_chunks"
 
     log_info "Calculating chunk allocation for workers"
     mapfile -t chunksByWorker < <(get_chunks_by_worker validatedWorkers "$workerConfigDir" "$totalNumOfChunks" "$totalWorkload")
@@ -319,7 +324,7 @@ for inputFile in "${renamedFiles[@]}"; do
     distribute_chunks_to_workers validatedWorkers $numberOfWorkers chunksByWorker "$chunksDir"
 
     log_info "Transferring chunks to workers and starting processes on workers"
-    start_workers validatedWorkers "$chunksDir" "$currentFileStaging" "$currentFileSignalDir"
+    start_workers validatedWorkers "$chunksDir" "$currentFileSignalDir"
 
     mapfile -t signalFilesToWait < <(get_signal_file_names validatedWorkers)
     log_info "Waiting for signal from workers"
@@ -330,9 +335,10 @@ for inputFile in "${renamedFiles[@]}"; do
     # --inputDir
     # continue process
 
-    log_info "Done processing $inputFile"
+    log_info "Done processing $inputFilePath"
 done
 
+log_info "Script ended"
 exit 0
 # # use bash yq to read configs for each worker
 # for worker in $worker_configs; do
@@ -350,5 +356,3 @@ exit 0
 # done
 
 # # start consolidate_srt.py in the controller to read srt_chunks_dir and consolidate all srt_chunks into a single srt file
-
-split_audio
