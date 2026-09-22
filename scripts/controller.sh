@@ -337,7 +337,7 @@ for inputFilePath in "${renamedFiles[@]}"; do
     log_info "Start consolidating SRT chunks from <$audioChunksDir>"
     outputFilePath="$outputDir/$inputFileNameNoExtension.SRT"
     # uv run src/distributed_audio_transcription/controller/consolidate_srt.py --srt-chunks-dir "tests/20260919_163731-test_data.m4a/audioChunks"
-    uv run src/distributed_audio_transcription/controller/consolidate_srt.py --srt-chunks-dir "$srtChunksDir" --output "$outputFilePath"
+    uv run src/distributed_audio_transcription/controller/consolidate_srt.py --srt-chunks-dir "$srtChunksDir" --output-file-path "$outputFilePath"
 
     log_info "Done processing $inputFilePath"
     processedFile=$((processedFile + 1))
