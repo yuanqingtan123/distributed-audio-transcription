@@ -172,8 +172,7 @@ function start_workers() {
     currentFileSignalDir="$3"
     pids=()
     for worker in "${localValidatedWorkers[@]}"; do
-        mkdir -p "$audioChunksDir/../tmp/$worker/"
-        ssh -tt "$worker" "proot-distro login ubuntu -- bash -c 'cd $workerProjectRoot && mkdir -p $audioChunksDir/../logs && scripts/worker.sh > $audioChunksDir/../logs/$worker.logs 2>&1 &'"
+        ssh "$worker" "nohup proot-distro login ubuntu -- bash -c 'cd \"$workerProjectRoot\" && mkdir -p \"$audioChunksDir/../logs\" && scripts/worker.sh -i $workerProjectRoot/$audioChunksDir/$worker -o $workerProjectRoot/$audioChunksDir/../srtChunks/$worker -s $workerProjectRoot/$audioChunksDir/../../signal > \"$audioChunksDir/../logs/${worker}.logs\" 2>&1' </dev/null >/dev/null 2>&1 &"
         log_info "Started script on $worker"
         rsync -azp --mkpath "$audioChunksDir/$worker" "$worker:$workerProjectRoot/$audioChunksDir/" &
         pid=$!
