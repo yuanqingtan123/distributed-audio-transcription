@@ -10,7 +10,7 @@ wheels/
 .venv
 
 # Configuration and secrets
-ssh_configs.yaml
+ssh-configs/
 
 # Data
 inputAudioFiles/

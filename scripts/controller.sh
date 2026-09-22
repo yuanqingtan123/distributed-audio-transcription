@@ -167,7 +167,6 @@ function distribute_chunks_to_workers() {
 }
 
 function start_workers() {
-    workerHome="/data/data/com.termux/files/home"
     local -n localValidatedWorkers="$1"
     audioChunksDir="$2"
     currentFileSignalDir="$3"
@@ -176,7 +175,7 @@ function start_workers() {
         mkdir -p "$audioChunksDir/../tmp/$worker/"
         ssh -tt "$worker" "proot-distro login ubuntu -- bash -c 'cd test && ~/.local/bin/uv run src/script.py 2>/dev/null'" >"$audioChunksDir/../tmp/$worker/abc.txt" 2>/dev/null &
         log_info "Started script on $worker"
-        rsync -azp --mkpath "$audioChunksDir/$worker" "$worker:$workerHome/$audioChunksDir/" &
+        rsync -azp --mkpath "$audioChunksDir/$worker" "$worker:$workerProjectRoot/$audioChunksDir/$worker/" &
         pid=$!
         pids+=($pid)
         log_info "PID $pid: Started transferring chunks to $worker"
@@ -188,7 +187,7 @@ function start_workers() {
         wait "$currentPid"
         signalFile="$currentFileSignalDir/controller-$currentWorker.signal"
         touch "$signalFile"
-        rsync -azp --mkpath $signalFile "$currentWorker:$workerHome/$currentFileSignalDir/"
+        rsync -azp --mkpath $signalFile "$currentWorker:$workerProjectRoot/$currentFileSignalDir/"
         log_info "Transfer chunks to $currentWorker complete"
         counter=$((counter + 1))
     done
