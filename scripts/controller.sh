@@ -303,7 +303,8 @@ processedFile=0
 for inputFilePath in "${renamedFiles[@]}"; do
     TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
     inputFileName=$(basename "$inputFilePath")
-    currentFileStaging="staging/$TIMESTAMP-$inputFileName"
+    inputFileNameNoExtension="${inputFileName%.*}"
+    currentFileStaging="staging/$TIMESTAMP-$inputFileNameNoExtension"
     audioChunksDir="$currentFileStaging/audioChunks"
     srtChunksDir="$currentFileStaging/srtChunks"
     currentFileSignalDir="$currentFileStaging/signal"
@@ -334,8 +335,9 @@ for inputFilePath in "${renamedFiles[@]}"; do
     log_info "All workers done."
 
     log_info "Start consolidating SRT chunks from <$audioChunksDir>"
+    outputFilePath="$outputDir/$inputFileNameNoExtension.SRT"
     # uv run src/distributed_audio_transcription/controller/consolidate_srt.py --srt-chunks-dir "tests/20260919_163731-test_data.m4a/audioChunks"
-    uv run src/distributed_audio_transcription/controller/consolidate_srt.py --srt-chunks-dir "$srtChunksDir"
+    uv run src/distributed_audio_transcription/controller/consolidate_srt.py --srt-chunks-dir "$srtChunksDir" --output "$outputFilePath"
 
     log_info "Done processing $inputFilePath"
     processedFile=$((processedFile + 1))

@@ -52,26 +52,14 @@ def consolidate_srt(start_time: float, start_srt_seq: int, srt_lines: list[dict[
 
 
 @click.command()
-@click.option("--srt-chunks-dir", required=True, type=click.Path(exists=False), help="Path to the folder containing srt chunks")
-def main(srt_chunks_dir):
+@click.option("--srt-chunks-dir", required=True, type=click.Path(exists=True), help="Path to the folder containing srt chunks csv files")
+@click.option("--output-file-path", required=True, type=click.Path(exists=False), help="Path to output the consolidated srt file")
+def main(srt_chunks_dir, output_file_path):
     script_name: str = Path(__file__).name
     logging.info(f"Script {script_name} started for <{srt_chunks_dir}>")
+    logging.info(f"Consolidating output to <{output_file_path}>")
 
-    pattern = r".*/\d{8}_\d{6}-(.*)/audioChunks"
-    filename_with_extension: str = re.search(pattern, srt_chunks_dir).group(1)
-
-    filename_no_extension: str = ".".join(
-        filename_with_extension.split(".")[:-1]
-    )
-
-    current_file_staging_dir: Path = Path(srt_chunks_dir).parent
-
-    output_srt_file: str = current_file_staging_dir\
-        .joinpath(f"{filename_no_extension}.SRT")
-
-    logging.info(f"Consolidating output to <{output_srt_file}>")
-
-    with open(output_srt_file, "w") as outfile:
+    with open(output_file_path, "w") as outfile:
         cumulative_time = 0.0
         srt_seq = 1
         for srt_chunk in tqdm(sorted(glob.glob(f"{srt_chunks_dir}/*/chunk_*.csv")), desc="Consolidating file"):
@@ -85,7 +73,7 @@ def main(srt_chunks_dir):
                 for formatted_line in formatted_lines:
                     outfile.write(formatted_line)
 
-    logging.info(f"Finish consolidating SRT to <{output_srt_file}>")
+    logging.info(f"Finish consolidating SRT to <{output_file_path}>")
     logging.info(f"Script {script_name} ended for <{srt_chunks_dir}>")
 
 
