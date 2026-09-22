@@ -64,16 +64,17 @@ def main(srt_chunks_dir):
         filename_with_extension.split(".")[:-1]
     )
 
-    parent_dir: Path = Path(srt_chunks_dir).parent
+    current_file_staging_dir: Path = Path(srt_chunks_dir).parent
 
-    output_srt_file: str = parent_dir.joinpath(f"{filename_no_extension}.SRT")
+    output_srt_file: str = current_file_staging_dir\
+        .joinpath(f"{filename_no_extension}.SRT")
 
     logging.info(f"Consolidating output to <{output_srt_file}>")
 
     with open(output_srt_file, "w") as outfile:
         cumulative_time = 0.0
         srt_seq = 1
-        for srt_chunk in tqdm(sorted(glob.glob(f"{srt_chunks_dir}/chunk_*.csv")), desc="Consolidating file"):
+        for srt_chunk in tqdm(sorted(glob.glob(f"{srt_chunks_dir}/*/chunk_*.csv")), desc="Consolidating file"):
             with open(srt_chunk, "r") as infile:
                 srt_lines: list[dict[str:Any]] = list(csv.DictReader(infile))
                 cumulative_time, srt_seq, formatted_lines = consolidate_srt(

@@ -58,7 +58,7 @@ while true; do
         fileBasename=$(basename "$f")
         uv run python -m distributed_audio_transcription.worker.transcribe_chunks \
         --input-file "$f" \
-        --output-file "$outputDir/$workerName${fileBasename/%.wav/}.csv"
+        --output-file "$outputDir/${fileBasename/%.wav/}.csv"
         log_info "$?"
         mv "$f" "$archiveDir/"
     done
