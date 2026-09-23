@@ -72,7 +72,7 @@ log_info "Finished transcribing all chunks in <$inputDir>"
 log_info "Transferring transcriptions back to controller"
 
 cleansedOutputDir="$(dirname "$outputDir")/$(basename "$outputDir")"
-rsync -azpR --mkpath --ignore-existing "./$cleansedOutputDir" "$controller:$controllerProjectRoot/"
+rsync -azp --mkpath --ignore-existing "$cleansedOutputDir" "$controller:$controllerProjectRoot/$cleansedOutputDir"
 if [[ "$?" -eq 0 ]]; then
     signalFileToController="$signalFileDir/$workerName-controller.signal"
     touch "$signalFileToController"
