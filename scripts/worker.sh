@@ -1,5 +1,39 @@
-#! /bin/bash
+#!/bin/bash
 
+# ==============================================================================
+# worker.sh
+#
+# Worker-side script for distributed audio transcription.
+#
+# This script runs on a worker device and:
+#
+#   1. Waits for audio chunks to become available.
+#   2. Transcribes each assigned WAV chunk.
+#   3. Archives processed audio chunks.
+#   4. Transfers the transcription results back to the controller.
+#   5. Signals the controller after all results have been transferred.
+#
+# The controller starts this script remotely and provides:
+#   - The directory containing the worker's assigned audio chunks.
+#   - The directory where transcription results should be written.
+#   - A signal file indicating that all assigned chunks have been transferred.
+#
+# Usage:
+#   ./worker.sh -i <input_directory> \
+#               -o <output_directory> \
+#               -s <signal_file>
+#
+# Dependencies:
+#   bash, uv, rsync, SSH access to the controller
+#
+# Related components:
+#   controller.sh          - Starts and coordinates worker processes.
+#   transcribe_chunks.py   - Transcribes individual audio chunks.
+# ==============================================================================
+
+# ==============================================================================
+# Logging utilities
+# ==============================================================================
 log_error() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: $@" >&2
 }
@@ -7,11 +41,16 @@ log_info() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] INFO: $@"
 }
 
+# ==============================================================================
+# Argument parsing
+# ==============================================================================
+
 SCRIPT_NAME=$(basename "$0")
 USAGE_MSG="./$SCRIPT_NAME -i [input directory] -o [output directory] -s [signal file]"
-# -------------------------------
+
+# ------------------------------------------------------------------------------
 # Argument validation
-# -------------------------------
+# ------------------------------------------------------------------------------
 if [[ $# -gt 6 ]]; then
     echo "Too many arguments"
     echo "$USAGE_MSG"
@@ -24,7 +63,9 @@ if [[ $(($# % 2)) -ne 0 ]]; then
     exit 1
 fi
 
-# Parse arguments into array
+# ------------------------------------------------------------------------------
+# Parse command-line arguments
+# ------------------------------------------------------------------------------
 while getopts "i:o:s:" opt; do
     case "$opt" in
     i) inputDir="$OPTARG" ;;
@@ -38,11 +79,26 @@ while getopts "i:o:s:" opt; do
     esac
 done
 
-# eg inputDir = staging/20260919_201738-6_May,_22.35.m4a/audioChunks/termux-phone
+# ------------------------------------------------------------------------------
+# Validate required arguments
+# ------------------------------------------------------------------------------
+if [[ -z "$inputDir" || -z "$outputDir" || -z "$signalFile" ]]; then
+    echo "Missing required argument"
+    echo "$USAGE_MSG"
+    exit 1
+fi
+
+# ==============================================================================
+# Worker paths
+# ==============================================================================
+# Derive worker-specific paths from the input and signal locations.
 workerName=$(basename "$inputDir")
 archiveDir="$(dirname "$(dirname "$inputDir")")/archive"
 signalFileDir="$(dirname "$signalFile")"
 
+# ==============================================================================
+# Initialization
+# ==============================================================================
 log_info "Script started"
 log_info "Input directory: $inputDir"
 log_info "Output directory: $outputDir"
@@ -53,16 +109,35 @@ source .env
 mkdir -p "$outputDir"
 mkdir -p "$archiveDir"
 
+# ==============================================================================
+# Transcription loop
+# ==============================================================================
+#
+# The worker polls the input directory for WAV chunks while the controller is
+# transferring them. Each available chunk is transcribed and then moved to the
+# archive directory so it is not processed again.
+#
+# The loop ends only when:
+#   1. The controller has created the signal file indicating that all chunks
+#      have been transferred.
+#   2. No WAV chunks remain in the input directory.
+#
+# This allows transcription to begin before all chunks have finished
+# transferring.
 while true; do
     for f in "$inputDir"/*.wav; do
         [ -e "$f" ] || continue
-        fileBasename=$(basename "$f")
+        chunkFileName=$(basename "$f")
         ~/.local/bin/uv run python -m distributed_audio_transcription.worker.transcribe_chunks \
-        --input-file "$f" \
-        --output-file "$outputDir/${fileBasename/%.wav/}.csv"
+            --input-file "$f" \
+            --output-file "$outputDir/${chunkFileName/%.wav/}.csv"
         log_info "$?"
+        # Move the processed chunk to the archive directory so it is not processed
+        # again during the next polling cycle.
         mv "$f" "$archiveDir/"
     done
+    # The worker can stop only after the controller has confirmed that all
+    # assigned chunks have been transferred and the input directory is empty.
     if [ -e "$signalFile" ] && [ ! "$(ls -A $inputDir)" ]; then
         break
     fi
@@ -72,8 +147,26 @@ done
 log_info "Finished transcribing all chunks in <$inputDir>"
 log_info "Transferring transcriptions back to controller"
 
-cleansedOutputDir="$(dirname "$outputDir")/$(basename "$outputDir")"
-rsync -azp --mkpath --ignore-existing "$cleansedOutputDir/" "$controller:$controllerProjectRoot/$cleansedOutputDir"
+# ==============================================================================
+# Transfer results
+# ==============================================================================
+#
+# After all assigned chunks have been transcribed, transfer the generated
+# transcription files back to the controller.
+#
+# The controller is notified only after the result transfer succeeds.
+transcriptionOutputDir="$(dirname "$outputDir")/$(basename "$outputDir")"
+rsync -azp --mkpath --ignore-existing "$transcriptionOutputDir/" "$controller:$controllerProjectRoot/$transcriptionOutputDir"
+
+# ==============================================================================
+# Worker completion
+# ==============================================================================
+#
+# Create and transfer the worker completion signal after all transcription
+# results have been successfully transferred to the controller.
+#
+# Signal:
+#   <worker>-controller.signal
 if [[ "$?" -eq 0 ]]; then
     signalFileToController="$signalFileDir/$workerName-controller.signal"
     touch "$signalFileToController"
@@ -85,16 +178,3 @@ else
     log_error "Failed to transfer all transcriptions back to controller."
     exit 1
 fi
-
-# keep_scanning=true
-# while $keep_scanning; do
-#   chunkfile=$(find staging -name chunk_*.wav | head)
-#   uv run transcription.py --input $chunkfile && mv $chunkfile $archive_dir
-#   chunkfile=$(find staging -name chunk_*.wav | head)
-#   if # chunkfile not available and worker_signal_dir/controller-worker signal file present
-#     keep_scanning=false
-# done
-
-# rsync $worker_srt_chunk_dir controller:$controller_srt_chunk_dir && \
-#   touch $worker-controller &&  \
-#   scp $worker-controller controller:$controller_signal_dir/  # a file to signal completion

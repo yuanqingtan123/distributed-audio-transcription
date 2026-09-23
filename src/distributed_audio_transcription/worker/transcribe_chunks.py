@@ -1,3 +1,22 @@
+#!/usr/bin/env python3
+
+"""
+Transcribe a single audio chunk using Faster Whisper.
+
+This module:
+    1. Loads the configured Whisper model from the local cache when available.
+    2. Downloads the model from Hugging Face if the local cache is unavailable.
+    3. Transcribes the specified audio chunk.
+    4. Writes the transcription segments to a CSV file.
+
+The script is invoked by worker.sh for each WAV chunk assigned to a worker.
+
+Command-line usage:
+    python -m distributed_audio_transcription.worker.transcribe_chunks \
+        -i <input_audio_file> \
+        -o <output_csv_file>
+"""
+
 from typing import Iterable
 
 from faster_whisper import WhisperModel
@@ -13,18 +32,45 @@ logging.basicConfig(
 )
 
 
-def transcribe_chunks(model_size: str, compute_type: str, input_file_path: str) -> Iterable[Segment]:
+def transcribe_chunks(
+    model_size: str,
+    compute_type: str,
+    input_file_path: str
+) -> Iterable[Segment]:
+    """
+    Load the Whisper model and transcribe an audio file.
+
+    The function first attempts to load the model from the local cache.
+    If the model is unavailable or the cache is corrupted, it falls back
+    to downloading the model from Hugging Face.
+
+    Args:
+        model_size: Whisper model to load.
+        compute_type: Compute type used by Faster Whisper.
+        input_file_path: Path to the audio file to transcribe.
+
+    Returns:
+        An iterable of transcription segments produced by Faster Whisper.
+    """
     try:
-        # 1. Try to load instantly from local cache without checking the internet
+        # Try the local model cache first to avoid downloading the model.
         logging.info("Loading model from local cache...")
-        model = WhisperModel(model_size, device="cpu",
-                             compute_type=compute_type, local_files_only=True)
+        model = WhisperModel(
+            model_size,
+            device="cpu",
+            compute_type=compute_type,
+            local_files_only=True
+        )
     except Exception:
-        # 2. If files are missing/deleted, fall back to online download
+        # Fall back to downloading the model if the local cache is unavailable.
         logging.warning(
             "Cache missing or corrupted! Downloading model from Hugging Face...")
-        model = WhisperModel(model_size, device="cpu",
-                             compute_type=compute_type, local_files_only=False)
+        model = WhisperModel(
+            model_size,
+            device="cpu",
+            compute_type=compute_type,
+            local_files_only=False
+        )
 
     logging.info(f"Transcribing <{input_file_path}>")
     segments, _ = model.transcribe(
@@ -37,9 +83,28 @@ def transcribe_chunks(model_size: str, compute_type: str, input_file_path: str) 
 
 
 @click.command()
-@click.option("--input-file", "-i", required=True, type=click.Path(exists=True), help="Path to the audio chunk to be transcribed")
-@click.option("--output-file", "-o", required=True, type=click.Path(exists=False), help="Path to output the transcription csv file")
+@click.option(
+    "--input-file",
+    "-i",
+    required=True,
+    type=click.Path(exists=True),
+    help="Path to the audio chunk to transcribe.",
+)
+@click.option(
+    "--output-file",
+    "-o",
+    required=True,
+    type=click.Path(exists=False),
+    help="Path for the output transcription CSV file.",
+)
 def main(input_file, output_file):
+    """
+    Transcribe an audio file and write the segments to a CSV file.
+
+    Args:
+        input_file: Path to the audio chunk.
+        output_file: Path where the transcription CSV will be written.
+    """
     logging.info(f"Script started for <{input_file}>")
 
     segments: Iterable[Segment] = transcribe_chunks(
