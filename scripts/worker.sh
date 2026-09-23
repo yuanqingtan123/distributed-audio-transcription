@@ -49,6 +49,7 @@ log_info "Output directory: $outputDir"
 log_info "Archive directory: $archiveDir"
 log_info "Signal file: $signalFile"
 
+source .env
 mkdir -p "$outputDir"
 mkdir -p "$archiveDir"
 
@@ -72,11 +73,11 @@ log_info "Finished transcribing all chunks in <$inputDir>"
 log_info "Transferring transcriptions back to controller"
 
 cleansedOutputDir="$(dirname "$outputDir")/$(basename "$outputDir")"
-rsync -azp --mkpath --ignore-existing "$cleansedOutputDir" "$controller:$controllerProjectRoot/$cleansedOutputDir"
+rsync -azp --mkpath --ignore-existing "$cleansedOutputDir/" "$controller:$controllerProjectRoot/$cleansedOutputDir"
 if [[ "$?" -eq 0 ]]; then
     signalFileToController="$signalFileDir/$workerName-controller.signal"
     touch "$signalFileToController"
-    rsync -avp --mkpath "./$signalFileToController" "$controller:$controllerProjectRoot/"
+    rsync -avp --mkpath "./$signalFileToController" "$controller:$controllerProjectRoot/$signalFileDir/"
     log_info "Finished transferring all transcriptions back to controller"
     log_info "Script ended"
     exit 0

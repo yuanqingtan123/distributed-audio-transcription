@@ -172,7 +172,7 @@ function start_workers() {
     currentFileSignalDir="$3"
     pids=()
     for worker in "${localValidatedWorkers[@]}"; do
-        ssh "$worker" "nohup proot-distro login ubuntu -- bash -c 'cd \"$workerProjectRoot\" && mkdir -p \"$audioChunksDir/../logs\" && scripts/worker.sh -i $workerProjectRoot/$audioChunksDir/$worker -o $workerProjectRoot/$audioChunksDir/../srtChunks/$worker -s $workerProjectRoot/$audioChunksDir/../signal > \"$audioChunksDir/../logs/${worker}.logs\" 2>&1' </dev/null >/dev/null 2>&1 &"
+        ssh "$worker" "nohup proot-distro login ubuntu -- bash -c 'cd \"$workerProjectRoot\" && mkdir -p \"$audioChunksDir/../logs\" && scripts/worker.sh -i $audioChunksDir/$worker -o $audioChunksDir/../srtChunks/$worker -s $currentFileSignalDir/controller-$worker.signal > \"$audioChunksDir/../logs/${worker}.logs\" 2>&1' </dev/null >/dev/null 2>&1 &"
         log_info "Started script on $worker"
         rsync -azp --mkpath "$audioChunksDir/$worker" "$worker:$workerProjectRoot/$audioChunksDir/" &
         pid=$!
@@ -270,7 +270,7 @@ log_info "Script started"
 log_info "Input directory: $inputDir"
 log_info "Output directory: $outputDir"
 log_info "Worker config directory: $workerConfigDir"
-
+source .env
 mapfile -t inputFiles < <(find "$inputDir" -maxdepth 1 -type f)
 
 numberOfInputFiles="${#inputFiles[@]}"
