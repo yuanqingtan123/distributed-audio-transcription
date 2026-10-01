@@ -133,21 +133,59 @@ function validate_config() {
         exit 1
     fi
 
-    local fields=("host" "user" "port" "password" "workload_weight")
+    local remoteWorkerFields=("host" "user" "port" "password" "workload_weight")
+    local controllerFields=("workload_weight")
     local validatedWorkers=()
     for worker in "${localWorkerAliases[@]}"; do
         local validWorker=1
-        for field in "${fields[@]}"; do
+
+        # Validate config for localWorker
+        if [[ "$worker" == "localWorker" ]]; then
+            for field in "${controllerFields[@]}"; do
+                local output=0
+                if ! output=$(yq -e ".configs[] | select(.alias == \"$worker\") | .$field" "$workerConfigFile" 2>/dev/null); then
+                    log_error "$field not found for $worker"
+                    validWorker=0
+                    break
+                fi
+                if [[ "$field" == "workload_weight" ]]; then
+                    if ! ([ -n "$output" ] && [ "$output" -eq "$output" ] 2>/dev/null); then
+                        log_error "Invalid workload_weight for $worker"
+                        validWorker=0
+                        break
+                    fi
+                    if [[ "$output" -eq 0 ]]; then
+                        log_info "workload_weight for $worker is 0. Excluding from worker list."
+                        validWorker=0
+                        break
+                    fi
+                fi
+            done
+            if [[ "$validWorker" -eq 1 ]]; then
+                validatedWorkers+=("$worker")
+            fi
+            continue
+        fi
+
+        # Validate config for remote workers
+        for field in "${remoteWorkerFields[@]}"; do
             local output=0
             if ! output=$(yq -e ".configs[] | select(.alias == \"$worker\") | .$field" "$workerConfigFile" 2>/dev/null); then
                 log_error "$field not found for $worker"
                 validWorker=0
                 break
             fi
-            if [[ "$field" == "workload_weight" ]] && ! ([ -n "$output" ] && [ "$output" -eq "$output" ] 2>/dev/null); then
-                log_error "Invalid workload_weight for $worker"
-                validWorker=0
-                break
+            if [[ "$field" == "workload_weight" ]]; then
+                if ! ([ -n "$output" ] && [ "$output" -eq "$output" ] 2>/dev/null); then
+                    log_error "Invalid workload_weight for $worker"
+                    validWorker=0
+                    break
+                fi
+                if [[ "$output" -eq 0 ]]; then
+                    log_error "workload_weight for $worker is 0. Excluding from worker list."
+                    validWorker=0
+                    break
+                fi
             fi
         done
         if [[ "$validWorker" -eq 1 ]]; then
@@ -367,6 +405,22 @@ function start_workers() {
     currentFileSignalDir="$3"
     local pids=()
     for worker in "${localValidatedWorkers[@]}"; do
+        # when using localWorker
+        if [[ "$worker" == "localWorker" ]]; then
+            local signalFile="$currentFileSignalDir/controller-$worker.signal"
+            # Start the worker before transferring its input chunks.
+            mkdir -p "$audioChunksDir/../logs" &&
+                scripts/worker.sh \
+                    -i $audioChunksDir/$worker \
+                    -o $audioChunksDir/../srtChunks/$worker \
+                    -s $currentFileSignalDir/controller-$worker.signal \
+                    >"$audioChunksDir/../logs/${worker}.logs" 2>&1 &
+            log_info "Started script on $worker"
+            touch "$signalFile"
+            continue
+        fi
+
+        # Remote workers
         # Start the worker before transferring its input chunks.
         ssh "$worker" "nohup proot-distro login ubuntu -- bash -c 'cd \"$workerProjectRoot\" && mkdir -p \"$audioChunksDir/../logs\" && scripts/worker.sh -i $audioChunksDir/$worker -o $audioChunksDir/../srtChunks/$worker -s $currentFileSignalDir/controller-$worker.signal > \"$audioChunksDir/../logs/${worker}.logs\" 2>&1' </dev/null >/dev/null 2>&1 &"
         log_info "Started script on $worker"
@@ -379,7 +433,8 @@ function start_workers() {
         log_info "PID $pid: Started transferring chunks to $worker"
     done
     local counter=0
-    while ((counter < numberOfWorkers)); do
+    # when using remoteWorker
+    while (("$worker" != "localWorker" && counter < numberOfWorkers)); do
         local currentWorker="${validatedWorkers[$counter]}"
         local currentPid="${pids[$counter]}"
 

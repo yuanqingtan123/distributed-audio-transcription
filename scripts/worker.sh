@@ -156,7 +156,17 @@ log_info "Transferring transcriptions back to controller"
 #
 # The controller is notified only after the result transfer succeeds.
 transcriptionOutputDir="$(dirname "$outputDir")/$(basename "$outputDir")"
-rsync -azp --mkpath --ignore-existing "$transcriptionOutputDir/" "$controller:$controllerProjectRoot/$transcriptionOutputDir"
+
+# No transfer needed when this script is run in the localWorker 
+if [[ "$workerName" == "localWorker" ]]; then
+    signalFileToController="$signalFileDir/$workerName-controller.signal"
+    touch "$signalFileToController"
+    log_info "Script ended"
+    exit 0
+else
+    # if using remote worker
+    rsync -azp --mkpath --ignore-existing "$transcriptionOutputDir/" "$controller:$controllerProjectRoot/$transcriptionOutputDir"
+fi
 
 # ==============================================================================
 # Worker completion
