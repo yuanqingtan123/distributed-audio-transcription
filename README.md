@@ -98,12 +98,15 @@ The controller requires:
 
 ```bash
 export workerProjectRoot=<path to the repo on the worker>
+# if controller is intended to be used as localWorker
+export UV_PATH=<path to uv>
 ```
 
 Example:
 
 ```bash
 export workerProjectRoot=/data/data/com.termux/files/home/distributed-audio-transcription
+export UV_PATH=/usr/bin/uv
 ```
 
 `workerProjectRoot` is the path to the project repository as seen from the worker environment.
@@ -117,6 +120,7 @@ Each worker requires:
 ```bash
 export controller=<SSH host alias for the controller>
 export controllerProjectRoot=<path to the repo on the controller>
+export UV_PATH=<path to uv>
 ```
 
 Example:
@@ -124,6 +128,7 @@ Example:
 ```bash
 export controller=controller
 export controllerProjectRoot=/home/user/distributed-audio-transcription
+export UV_PATH="~/.local/bin/uv"
 ```
 
 `controller` identifies the SSH host used by the worker to connect back to the controller.
@@ -136,67 +141,106 @@ export controllerProjectRoot=/home/user/distributed-audio-transcription
 
 The controller uses a YAML configuration file to define the available workers.
 
+Each worker must have a unique `alias`. The alias `localWorker` is reserved for the controller machine itself.
+
 ### Configuration Fields
 
-| Field             | Purpose                                                         |
-| ----------------- | --------------------------------------------------------------- |
-| `alias`           | Unique identifier used by the controller to identify the worker |
-| `host`            | Hostname or network address used for SSH and rsync              |
-| `user`            | SSH username used to access the worker                          |
-| `port`            | SSH port used by the worker                                     |
-| `password`        | Authentication credential used when connecting to the worker    |
-| `workload_weight` | Relative amount of transcription work assigned to the worker    |
+| Field             | Purpose                                                           |
+| ----------------- | ----------------------------------------------------------------- |
+| `alias`           | Unique identifier used by the controller to identify the worker   |
+| `host`            | Hostname or network address used to access a remote worker        |
+| `user`            | SSH username used to access a remote worker                       |
+| `port`            | SSH port used to access a remote worker                           |
+| `password`        | Authentication credential used when connecting to a remote worker |
+| `workload_weight` | Relative amount of transcription work assigned to the worker      |
 
-### `alias`
+### Local Worker
 
-The alias must be unique within the configuration because it is used as the worker identifier throughout the controller/worker workflow.
+The controller machine can also perform transcription as a worker.
 
-### `workload_weight`
+To configure the controller as a worker, use the reserved alias:
 
-Workload weights determine the relative number of audio chunks assigned to each worker.
+```yaml
+alias: localWorker
+```
+
+`localWorker` is a special alias and can only appear **once** in the worker configuration.
+
+A local worker only requires:
+
+* `alias: localWorker`
+* `workload_weight`
+
+Remote-worker connection fields such as `host`, `user`, `port`, and `password` are not required for `localWorker`.
+
+### Remote Workers
+
+All workers other than `localWorker` are treated as remote workers.
+
+Remote workers require all configuration fields:
+
+```yaml
+alias: worker1
+host: worker1.example
+user: username
+port: 22
+password: <worker-password>
+workload_weight: 2
+```
+
+The controller uses these fields to connect to the worker through SSH and transfer files using `rsync`.
+
+### Workload Weight
+
+`workload_weight` determines the relative amount of transcription work assigned to each worker.
 
 For example:
 
 ```text
-worker1: workload_weight = 1
-worker2: workload_weight = 2
-worker3: workload_weight = 3
+localWorker: workload_weight = 1
+worker1:     workload_weight = 2
+worker2:     workload_weight = 3
 ```
 
 The workers receive approximately:
 
 ```text
-worker1 → 1/6 of the chunks
-worker2 → 2/6 of the chunks
-worker3 → 3/6 of the chunks
+localWorker → 1/6 of the chunks
+worker1     → 2/6 of the chunks
+worker2     → 3/6 of the chunks
 ```
 
 The workload weight must be a numeric value.
 
 The controller rounds the initial proportional allocation to whole chunks. Any remaining chunks are assigned to workers with the smallest current allocation.
 
-### Example
+### Example Configuration
+
+A configuration containing the controller machine and two remote workers could look like:
 
 ```yaml
 configs:
+  - alias: localWorker
+    workload_weight: 1
+
   - alias: worker1
     host: worker1.example
     user: username
     port: 22
     password: <worker-password>
-    workload_weight: 1
+    workload_weight: 2
 
   - alias: worker2
     host: worker2.example
     user: username
     port: 22
     password: <worker-password>
-    workload_weight: 2
+    workload_weight: 3
 ```
 
+> `localWorker` is a reserved alias and may only appear once in the configuration.
+>
 > Do not commit real worker passwords or other credentials to the repository.
-
----
 
 ## Usage
 
@@ -509,9 +553,15 @@ worker2 → weight 2
 
 means worker2 receives approximately twice as many chunks as worker1.
 
+`localWorker`, if configured, participates in the same workload allocation as remote workers.
+
 ### 4. Controller starts workers and transfers chunks
 
-The controller starts `worker.sh` remotely for each worker.
+The controller starts `worker.sh` for each configured worker.
+
+For `localWorker`, `worker.sh` runs directly on the controller machine.
+
+For remote workers, `worker.sh` is started through SSH.
 
 Chunk transfers are performed in parallel.
 
@@ -525,7 +575,7 @@ After a worker's chunk transfer finishes, the controller creates:
 controller-<worker>.signal
 ```
 
-and transfers the signal to that worker.
+and makes the signal available to that worker.
 
 The signal tells the worker that no more chunks will be transferred for the current input file.
 
@@ -552,11 +602,13 @@ After the result transfer succeeds, the worker creates:
 <worker>-controller.signal
 ```
 
-and transfers the signal to the controller.
+and makes the signal available to the controller.
 
 ### 8. Controller waits for all workers
 
 The controller monitors the signal directory and waits until every configured worker has sent its completion signal.
+
+This includes `localWorker`, if it is configured.
 
 ### 9. Controller consolidates the results
 

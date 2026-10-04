@@ -134,53 +134,35 @@ function validate_config() {
     fi
 
     local remoteWorkerFields=("host" "user" "port" "password" "workload_weight")
-    local controllerFields=("workload_weight")
+    local localWorkerFields=("workload_weight")
     local validatedWorkers=()
+
     for worker in "${localWorkerAliases[@]}"; do
         local validWorker=1
+        local fields=()
 
-        # Validate config for localWorker
         if [[ "$worker" == "localWorker" ]]; then
-            for field in "${controllerFields[@]}"; do
-                local output=0
-                if ! output=$(yq -e ".configs[] | select(.alias == \"$worker\") | .$field" "$workerConfigFile" 2>/dev/null); then
-                    log_error "$field not found for $worker"
-                    validWorker=0
-                    break
-                fi
-                if [[ "$field" == "workload_weight" ]]; then
-                    if ! ([ -n "$output" ] && [ "$output" -eq "$output" ] 2>/dev/null); then
-                        log_error "Invalid workload_weight for $worker"
-                        validWorker=0
-                        break
-                    fi
-                    if [[ "$output" -eq 0 ]]; then
-                        log_info "workload_weight for $worker is 0. Excluding from worker list."
-                        validWorker=0
-                        break
-                    fi
-                fi
-            done
-            if [[ "$validWorker" -eq 1 ]]; then
-                validatedWorkers+=("$worker")
-            fi
-            continue
+            fields=("${localWorkerFields[@]}")
+        else
+            fields=("${remoteWorkerFields[@]}")
         fi
 
-        # Validate config for remote workers
-        for field in "${remoteWorkerFields[@]}"; do
+        for field in "${fields[@]}"; do
             local output=0
+
             if ! output=$(yq -e ".configs[] | select(.alias == \"$worker\") | .$field" "$workerConfigFile" 2>/dev/null); then
                 log_error "$field not found for $worker"
                 validWorker=0
                 break
             fi
+
             if [[ "$field" == "workload_weight" ]]; then
-                if ! ([ -n "$output" ] && [ "$output" -eq "$output" ] 2>/dev/null); then
+                if ! [[ -n "$output" && "$output" -eq "$output" ]] 2>/dev/null; then
                     log_error "Invalid workload_weight for $worker"
                     validWorker=0
                     break
                 fi
+
                 if [[ "$output" -eq 0 ]]; then
                     log_error "workload_weight for $worker is 0. Excluding from worker list."
                     validWorker=0
@@ -188,10 +170,12 @@ function validate_config() {
                 fi
             fi
         done
+
         if [[ "$validWorker" -eq 1 ]]; then
             validatedWorkers+=("$worker")
         fi
     done
+
     printf "%s\n" "${validatedWorkers[@]}"
 }
 
@@ -392,62 +376,84 @@ function distribute_chunks_to_workers() {
 #   $3 - Directory used for controller/worker signal files.
 #
 # Process:
-#   1. Start worker.sh remotely through SSH.
-#   2. Transfer the worker's assigned chunks using rsync.
-#   3. Wait for the chunk transfer to complete.
+#   1. Start worker.sh on each worker.
+#   2. Transfer each worker's assigned chunks asynchronously.
+#   3. Wait for each worker's chunk transfer to complete.
 #   4. Create and transfer a signal file indicating that all chunks are ready.
 #
 # Note:
-#   Chunk transfers are started in parallel for all workers.
+#   Chunk transfers are started in parallel for all remote workers.
+#   localWorker does not require a chunk transfer.
+
 function start_workers() {
     local -n localValidatedWorkers="$1"
-    audioChunksDir="$2"
-    currentFileSignalDir="$3"
-    local pids=()
+    local audioChunksDir="$2"
+    local currentFileSignalDir="$3"
+
+    local -A workerPids=()
+
     for worker in "${localValidatedWorkers[@]}"; do
-        # when using localWorker
+        local signalFile="$currentFileSignalDir/controller-$worker.signal"
+        local srtChunksDir="$audioChunksDir/../srtChunks/$worker"
+
+        # Start the worker before transferring its input chunks.
         if [[ "$worker" == "localWorker" ]]; then
-            local signalFile="$currentFileSignalDir/controller-$worker.signal"
-            # Start the worker before transferring its input chunks.
-            mkdir -p "$audioChunksDir/../logs" &&
-                scripts/worker.sh \
-                    -i $audioChunksDir/$worker \
-                    -o $audioChunksDir/../srtChunks/$worker \
-                    -s $currentFileSignalDir/controller-$worker.signal \
-                    >"$audioChunksDir/../logs/${worker}.logs" 2>&1 &
+            mkdir -p "$audioChunksDir/../logs"
+
+            scripts/worker.sh \
+                -i "$audioChunksDir/$worker" \
+                -o "$srtChunksDir" \
+                -s "$signalFile" \
+                >"$audioChunksDir/../logs/${worker}.logs" 2>&1 &
+
             log_info "Started script on $worker"
+
+            # The local worker's chunks are already available locally, so no
+            # transfer is required. Signal that its input is ready immediately.
             touch "$signalFile"
+
             continue
         fi
 
-        # Remote workers
-        # Start the worker before transferring its input chunks.
-        ssh "$worker" "nohup proot-distro login ubuntu -- bash -c 'cd \"$workerProjectRoot\" && mkdir -p \"$audioChunksDir/../logs\" && scripts/worker.sh -i $audioChunksDir/$worker -o $audioChunksDir/../srtChunks/$worker -s $currentFileSignalDir/controller-$worker.signal > \"$audioChunksDir/../logs/${worker}.logs\" 2>&1' </dev/null >/dev/null 2>&1 &"
+        # Start the remote worker before transferring its input chunks.
+        ssh "$worker" \
+            "nohup proot-distro login ubuntu -- bash -c 'cd \"$workerProjectRoot\" && mkdir -p \"$audioChunksDir/../logs\" && scripts/worker.sh -i \"$audioChunksDir/$worker\" -o \"$srtChunksDir\" -s \"$signalFile\" > \"$audioChunksDir/../logs/${worker}.logs\" 2>&1' </dev/null >/dev/null 2>&1 &"
+
         log_info "Started script on $worker"
 
-        # Transfer this worker's chunks asynchronously so all workers can receive
-        # their input in parallel.
-        rsync -azp --mkpath "$audioChunksDir/$worker" "$worker:$workerProjectRoot/$audioChunksDir/" &
+        # Transfer this worker's chunks asynchronously so all workers can
+        # receive their input in parallel.
+        rsync -azp --mkpath \
+            "$audioChunksDir/$worker" \
+            "$worker:$workerProjectRoot/$audioChunksDir/" &
+
         local pid=$!
-        pids+=($pid)
+        workerPids["$worker"]="$pid"
+
         log_info "PID $pid: Started transferring chunks to $worker"
     done
-    local counter=0
-    # when using remoteWorker
-    while (("$worker" != "localWorker" && counter < numberOfWorkers)); do
-        local currentWorker="${validatedWorkers[$counter]}"
-        local currentPid="${pids[$counter]}"
 
-        # Wait for each worker's chunk transfer to finish before sending its
-        # "chunks ready" signal.
-        wait "$currentPid"
-        local signalFile="$currentFileSignalDir/controller-$currentWorker.signal"
+    # Wait for each remote worker's chunk transfer to finish before sending
+    # its "chunks ready" signal.
+    for worker in "${localValidatedWorkers[@]}"; do
+        if [[ "$worker" == "localWorker" ]]; then
+            continue
+        fi
 
-        # Create the signal locally only after the complete chunk transfer succeeds.
+        local pid="${workerPids[$worker]}"
+        local signalFile="$currentFileSignalDir/controller-$worker.signal"
+
+        wait "$pid"
+
+        # Create the signal locally only after the complete chunk transfer
+        # succeeds.
         touch "$signalFile"
-        rsync -azp --mkpath "$signalFile" "$currentWorker:$workerProjectRoot/$currentFileSignalDir/"
-        log_info "Transfer chunks to $currentWorker complete"
-        counter=$((counter + 1))
+
+        rsync -azp --mkpath \
+            "$signalFile" \
+            "$worker:$workerProjectRoot/$currentFileSignalDir/"
+
+        log_info "Transfer chunks to $worker complete"
     done
 }
 
