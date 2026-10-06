@@ -19,7 +19,6 @@ import glob
 from pathlib import Path
 import re
 import csv
-from typing import Any
 from tqdm import tqdm
 
 logging.basicConfig(
@@ -47,7 +46,7 @@ def get_timestamp(seconds: float) -> str:
 def consolidate_srt(
     start_time: float,
     start_srt_seq: int,
-    transcription_segments: list[dict[str, Any]],
+    transcription_segments: list[dict[str, str]],
 ) -> tuple[float, int, list[str]]:
     """
     Convert transcription segments into formatted SRT entries.
@@ -109,12 +108,13 @@ def main(srt_chunks_dir, output_file_path):
         cumulative_time = 0.0
         srt_seq = 1
         # Process all worker chunk results in chunk filename order.
-        for srt_chunk in tqdm(
-            sorted(glob.glob(f"{srt_chunks_dir}/*/chunk_*.csv")),
-            desc="Consolidating file",
-        ):
+        sorted_chunks = sorted(
+            glob.glob(f"{srt_chunks_dir}/*/chunk_*.csv"),
+            key=lambda path: int(re.match(r".*/chunk_(.*).csv", path).group(1))
+        )
+        for srt_chunk in tqdm(sorted_chunks, desc="Consolidating file",):
             with open(srt_chunk, "r") as infile:
-                transcription_segments: list[dict[str:Any]] = list(
+                transcription_segments: list[dict[str, str]] = list(
                     csv.DictReader(infile))
                 cumulative_time, srt_seq, formatted_lines = consolidate_srt(
                     cumulative_time, srt_seq, transcription_segments
